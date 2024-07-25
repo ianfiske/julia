@@ -1,31 +1,77 @@
-JULIAHOME = ..
-include ../Make.inc
+SRCDIR := $(abspath $(dir $(lastword $(MAKEFILE_LIST))))
+JULIAHOME := $(abspath $(SRCDIR)/..)
+BUILDDIR := .
+include $(JULIAHOME)/Make.inc
+VERSDIR := v$(shell cut -d. -f1-2 < $(JULIAHOME)/VERSION)
+STDLIBDIR := $(build_datarootdir)/julia/stdlib/$(VERSDIR)
+# TODO: this Makefile ignores BUILDDIR, except for computing JULIA_EXECUTABLE
 
-default all extra unicode::
-	@$(MAKE) -sC unicode
+export JULIA_DEPOT_PATH := $(build_prefix)/share/julia
+export JULIA_LOAD_PATH := @$(PATHSEP)@stdlib
+unexport JULIA_PROJECT :=
+unexport JULIA_BINDIR :=
 
-TESTS = default all extra \
-core numbers strings unicode corelib hashing \
-arrayops lapack factorizations fft sparse arpack bitarray \
-random special functional bigint dists combinatorics statistics \
-glpk linprog sparse bigfloat poly file Rmath remote zlib
+TESTGROUPS = unicode strings compiler
+TESTS = all default stdlib $(TESTGROUPS) \
+		$(patsubst $(STDLIBDIR)/%/,%,$(dir $(wildcard $(STDLIBDIR)/*/.))) \
+		$(filter-out runtests testdefs relocatedepot, \
+			$(patsubst $(SRCDIR)/%.jl,%,$(wildcard $(SRCDIR)/*.jl))) \
+		$(foreach group,$(TESTGROUPS), \
+			$(patsubst $(SRCDIR)/%.jl,%,$(wildcard $(SRCDIR)/$(group)/*.jl)))
+# run `make print-TESTS` to see a list of all tests that can be run
 
-$(TESTS) ::
-	$(QUIET_JULIA) $(JULIA_EXECUTABLE) ./runtests.jl $@
+EMBEDDING_ARGS := "JULIA=$(JULIA_EXECUTABLE)" "BIN=$(SRCDIR)/embedding" "CC=$(CC)"
 
-perf:
-ifneq ($(MAKECMDGOALS),perf)
-	$(QUIET_JULIA) $(JULIA_EXECUTABLE) perf/$@.jl
-else
-	@$(JULIA_EXECUTABLE) perf/$@.jl | perl -nle '@_=split/,/; printf "%-14s %7.3f\n", $$_[1], $$_[2]'
-endif
+GCEXT_ARGS := "JULIA=$(JULIA_EXECUTABLE)" "BIN=$(SRCDIR)/gcext" "CC=$(CC)"
 
-benchmark:
-	@$(MAKE) -C perf $@
+default:
+
+$(TESTS):
+	@cd $(SRCDIR) && \
+	$(call PRINT_JULIA, $(call spawn,$(JULIA_EXECUTABLE)) --check-bounds=yes --startup-file=no --depwarn=error ./runtests.jl $@)
+
+$(addprefix revise-, $(TESTS)): revise-% :
+	@cd $(SRCDIR) && \
+    $(call PRINT_JULIA, $(call spawn,$(JULIA_EXECUTABLE)) --check-bounds=yes --startup-file=no --depwarn=error ./runtests.jl --revise $*)
+
+relocatedepot:
+	@rm -rf $(SRCDIR)/relocatedepot
+	@cd $(SRCDIR) && \
+	$(call PRINT_JULIA, $(call spawn,$(JULIA_EXECUTABLE)) --check-bounds=yes --startup-file=no --depwarn=error ./runtests.jl $@)
+	@mkdir $(SRCDIR)/relocatedepot
+	@cp -R $(build_datarootdir)/julia $(SRCDIR)/relocatedepot
+	@cp -R $(SRCDIR)/RelocationTestPkg1 $(SRCDIR)/relocatedepot
+	@cp -R $(SRCDIR)/RelocationTestPkg2 $(SRCDIR)/relocatedepot
+	@cp -R $(SRCDIR)/RelocationTestPkg3 $(SRCDIR)/relocatedepot
+	@cp -R $(SRCDIR)/RelocationTestPkg4 $(SRCDIR)/relocatedepot
+	@cd $(SRCDIR) && \
+	$(call PRINT_JULIA, $(call spawn,RELOCATEDEPOT="" $(JULIA_EXECUTABLE)) --check-bounds=yes --startup-file=no --depwarn=error ./runtests.jl $@)
+
+revise-relocatedepot: revise-% :
+	@rm -rf $(SRCDIR)/relocatedepot
+	@cd $(SRCDIR) && \
+	$(call PRINT_JULIA, $(call spawn,$(JULIA_EXECUTABLE)) --check-bounds=yes --startup-file=no --depwarn=error ./runtests.jl --revise $*)
+	@mkdir $(SRCDIR)/relocatedepot
+	@cp -R $(build_datarootdir)/julia $(SRCDIR)/relocatedepot
+	@cp -R $(SRCDIR)/RelocationTestPkg1 $(SRCDIR)/relocatedepot
+	@cp -R $(SRCDIR)/RelocationTestPkg2 $(SRCDIR)/relocatedepot
+	@cp -R $(SRCDIR)/RelocationTestPkg3 $(SRCDIR)/relocatedepot
+	@cp -R $(SRCDIR)/RelocationTestPkg4 $(SRCDIR)/relocatedepot
+	@cd $(SRCDIR) && \
+	$(call PRINT_JULIA, $(call spawn,RELOCATEDEPOT="" $(JULIA_EXECUTABLE)) --check-bounds=yes --startup-file=no --depwarn=error ./runtests.jl --revise $*)
+
+embedding:
+	@$(MAKE) -C $(SRCDIR)/$@ check $(EMBEDDING_ARGS)
+
+gcext:
+	@$(MAKE) -C $(SRCDIR)/$@ check $(GCEXT_ARGS)
+
+clangsa:
+	@$(MAKE) -C $(SRCDIR)/$@
 
 clean:
-	@$(MAKE) -C unicode $@
-	@$(MAKE) -C perf $@
+	@$(MAKE) -C embedding $@ $(EMBEDDING_ARGS)
+	@$(MAKE) -C gcext $@ $(GCEXT_ARGS)
+	@$(MAKE) -C llvmpasses $@
 
-.PHONY: $(TESTS) perf benchmark clean
-
+.PHONY: $(TESTS) $(addprefix revise-, $(TESTS)) relocatedepot revise-relocatedepot embedding gcext clangsa clean

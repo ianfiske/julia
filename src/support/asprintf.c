@@ -17,8 +17,6 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
-extern int vsnprintf();
-
 /* Include vasprintf() if not on your OS. */
 #ifndef HAVE_VASPRINTF
 
@@ -26,6 +24,7 @@ extern int vsnprintf();
 #include <limits.h>
 #include <stdarg.h>
 #include <stdlib.h>
+#include <stdio.h>
 
 #ifndef VA_COPY
 # ifdef HAVE_VA_COPY
@@ -39,7 +38,13 @@ extern int vsnprintf();
 # endif
 #endif
 
+#ifndef _WIN32
 #define INIT_SZ 128
+#endif
+
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 int
 vasprintf(char **str, const char *fmt, va_list ap)
@@ -50,7 +55,12 @@ vasprintf(char **str, const char *fmt, va_list ap)
         size_t len;
 
         VA_COPY(ap2, ap);
-        if ((string = malloc(INIT_SZ)) == NULL)
+
+#ifdef _WIN32
+        int INIT_SZ = _vscprintf(fmt, ap2);
+#endif
+
+        if ((string = (char*)malloc(INIT_SZ)) == NULL)
                 goto fail;
 
         ret = vsnprintf(string, INIT_SZ, fmt, ap2);
@@ -60,7 +70,7 @@ vasprintf(char **str, const char *fmt, va_list ap)
                 goto fail;
         } else {        /* bigger than initial, realloc allowing for nul */
                 len = (size_t)ret + 1;
-                if ((newstr = realloc(string, len)) == NULL) {
+                if ((newstr = (char*)realloc(string, len)) == NULL) {
                         free(string);
                         goto fail;
                 } else {
@@ -92,12 +102,16 @@ int asprintf(char **str, const char *fmt, ...)
 {
         va_list ap;
         int ret;
-        
+
         *str = NULL;
         va_start(ap, fmt);
         ret = vasprintf(str, fmt, ap);
         va_end(ap);
 
         return ret;
+}
+#endif
+
+#ifdef __cplusplus
 }
 #endif

@@ -1,0 +1,7 @@
+## jll artifact
+BLASTRAMPOLINE_JLL_NAME := libblastrampoline
+
+## source build
+BLASTRAMPOLINE_VER := 5.10.1
+BLASTRAMPOLINE_BRANCH=v5.10.1
+BLASTRAMPOLINE_SHA1=ff05ebb4e450deda0aebe8dce4d4f054e23fecfc

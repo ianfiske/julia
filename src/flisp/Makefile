@@ -1,70 +1,144 @@
-JULIAHOME = $(abspath ../..)
+SRCDIR := $(abspath $(dir $(lastword $(MAKEFILE_LIST))))
+JULIAHOME := $(abspath $(SRCDIR)/../..)
+BUILDDIR := .
 include $(JULIAHOME)/Make.inc
 
-override CFLAGS += $(JCFLAGS)
-override CXXFLAGS += $(JCXXFLAGS)
+JCFLAGS += $(CFLAGS)
+JCXXFLAGS += $(CXXFLAGS)
+JCPPFLAGS += $(CPPFLAGS)
+JLDFLAGS += $(LDFLAGS)
 
-NAME = flisp
-EXENAME = $(NAME)
-LIBTARGET = lib$(NAME)
+NAME := flisp
+EXENAME := $(NAME)
+LIBTARGET := lib$(NAME)
 
-SRCS = flisp.c builtins.c string.c equalhash.c table.c iostream.c \
+SRCS := flisp.c builtins.c string.c equalhash.c table.c iostream.c \
         julia_extensions.c
 
-OBJS = $(SRCS:%.c=%.o)
-DOBJS = $(SRCS:%.c=%.do)
-LLTDIR = ../support
-LLT = $(LLTDIR)/libsupport.a $(USRLIB)/uv.a
+LLTDIR := ../support
+LLTSRCDIR := $(SRCDIR)/$(LLTDIR)
+NATIVE_BUILDDIR :=
+ifeq ($(BUILDING_HOST_TOOLS), 1)
+NATIVE_BUILDDIR := $(BUILDDIR)/..
+LLT_BUILDDIR := $(BUILDDIR)/../$(LLTDIR)/host
+else
+NATIVE_BUILDDIR := $(BUILDDIR)
+LLT_BUILDDIR := $(BUILDDIR)/$(LLTDIR)
+endif
 
-FLAGS = -Wall -Wno-strict-aliasing -I$(LLTDIR) $(CFLAGS) \
-	-DUSE_COMPUTED_GOTO $(HFILEDIRS:%=-I%) $(LIBDIRS:%=-L%) -fvisibility=hidden
-LIBFILES = $(LLT)
-LIBS = $(LIBFILES) -lm -lpthread
+HEADERS := $(wildcard *.h) $(LIBUV_INC)/uv.h $(wildcard $(LLTDIR)/*.h)
+
+OBJS := $(SRCS:%.c=$(BUILDDIR)/%.o)
+DOBJS := $(SRCS:%.c=$(BUILDDIR)/%.dbg.obj)
+LLT_release := $(LLT_BUILDDIR)/libsupport.a
+LLT_debug := $(LLT_BUILDDIR)/libsupport-debug.a
+LIBFILES_release := $(LLT_release) $(LIBUV)
+LIBFILES_debug := $(LLT_debug) $(LIBUV)
+LIBS :=
+ifneq ($(OS),WINNT)
+LIBS += -lpthread
+endif
+
+ifeq ($(USE_SYSTEM_UTF8PROC),0)
+LIBFILES_release += $(LIBUTF8PROC)
+LIBFILES_debug += $(LIBUTF8PROC)
+else
+LIBS += $(LIBUTF8PROC)
+endif
+
+
+FLAGS := -I$(LLTSRCDIR) $(JCFLAGS) $(HFILEDIRS:%=-I%) \
+        -I$(LIBUV_INC) -I$(UTF8PROC_INC) -I$(build_includedir) $(LIBDIRS:%=-L%) \
+        -DJL_LIBRARY_EXPORTS_INTERNAL -DUTF8PROC_EXPORTS
+ifneq ($(OS), emscripten)
+FLAGS += -DUSE_COMPUTED_GOTO
+endif
+FLAGS += -Wall -Wno-strict-aliasing -fvisibility=hidden -Wpointer-arith -Wundef
+FLAGS += -Wold-style-definition -Wstrict-prototypes -Wc++-compat
 
 DEBUGFLAGS += $(FLAGS)
 SHIPFLAGS += $(FLAGS)
 
 default: release
 
-release: $(EXENAME)
+release: $(BUILDDIR)/$(EXENAME)$(EXE)
 
-debug: $(EXENAME)-debug
+debug: $(BUILDDIR)/$(EXENAME)-debug$(EXE)
 
-HEADERS = $(wildcard *.h) $(JULIAHOME)/deps/libuv/include/uv.h
+$(BUILDDIR):
+	mkdir -p $(BUILDDIR)
 
-%.o: %.c $(HEADERS)
-	$(QUIET_CC) $(CC) $(SHIPFLAGS) -c $< -o $@
-%.do: %.c $(HEADERS)
-	$(QUIET_CC) $(CC) $(DEBUGFLAGS) -c $< -o $@
+$(BUILDDIR)/%.o: $(SRCDIR)/%.c $(HEADERS) | $(BUILDDIR)
+	@$(call PRINT_CC, $(CC) $(JCPPFLAGS) $(SHIPFLAGS) $(DISABLE_ASSERTIONS) -c $< -o $@)
+$(BUILDDIR)/%.dbg.obj: $(SRCDIR)/%.c $(HEADERS) | $(BUILDDIR)
+	@$(call PRINT_CC, $(CC) $(JCPPFLAGS) $(DEBUGFLAGS) -c $< -o $@)
 
-flisp.o:   flisp.c cvalues.c types.c flisp.h print.c read.c equal.c
-flisp.do:  flisp.c cvalues.c types.c flisp.h print.c read.c equal.c
-flmain.o:  flmain.c flisp.h
-flmain.do: flmain.c flisp.h
+FLISP_SRCS := $(addprefix $(SRCDIR)/,flisp.c cvalues.c types.c flisp.h print.c read.c equal.c)
+FLMAIN_SRCS := $(addprefix $(SRCDIR)/,flmain.c flisp.h)
+$(BUILDDIR)/flisp.o: $(FLISP_SRCS)
+$(BUILDDIR)/flisp.dbg.obj: $(FLISP_SRCS)
+$(BUILDDIR)/flmain.o: $(FLMAIN_SRCS)
+$(BUILDDIR)/flmain.dbg.obj: $(FLMAIN_SRCS)
 
-$(LLT): $(LLTDIR)/*.h $(LLTDIR)/*.c
-	cd $(LLTDIR) && $(MAKE)
+$(LLT_release): $(LLTSRCDIR)/*.h $(LLTSRCDIR)/*.c
+	$(MAKE) -C $(NATIVE_BUILDDIR)/$(LLTDIR) $(subst $(abspath $(NATIVE_BUILDDIR)/$(LLTDIR))/,,$(abspath $(LLT_release)))
+$(LLT_debug): $(LLTSRCDIR)/*.h $(LLTSRCDIR)/*.c
+	$(MAKE) -C $(NATIVE_BUILDDIR)/$(LLTDIR) $(subst $(abspath $(NATIVE_BUILDDIR)/$(LLTDIR))/,,$(abspath $(LLT_debug)))
 
-$(LIBTARGET)-debug.a: $(DOBJS)
+$(BUILDDIR)/$(LIBTARGET)-debug.a: $(DOBJS) | $(BUILDDIR)
 	rm -rf $@
-	$(QUIET_LINK) ar -rcs $@ $(DOBJS)
-	ln -sf $@ $(LIBTARGET).a
+	@$(call PRINT_LINK, $(AR) -rcs $@ $(DOBJS))
 
-$(LIBTARGET).a: $(OBJS)
+$(BUILDDIR)/$(LIBTARGET).a: $(OBJS) | $(BUILDDIR)
 	rm -rf $@
-	$(QUIET_LINK) ar -rcs $@ $(OBJS)
+	@$(call PRINT_LINK, $(AR) -rcs $@ $(OBJS))
 
-$(EXENAME)-debug: $(DOBJS) $(LIBFILES) $(LIBTARGET)-debug.a flmain.do
-	$(QUIET_CC) $(CC) $(DEBUGFLAGS) $(DOBJS) flmain.do -o $(EXENAME)-debug $(LIBS) $(LIBTARGET).a $(OSLIBS)
-	./$(EXENAME)-debug unittest.lsp
+CCLD := $(CC)
 
-$(EXENAME): $(OBJS) $(LIBFILES) $(LIBTARGET).a flmain.o
-	$(QUIET_CC) $(CC) $(SHIPFLAGS) $(OBJS) flmain.o -o $(EXENAME) $(LIBS) $(LIBTARGET).a $(OSLIBS)
-	./$(EXENAME) unittest.lsp
+# Override `-shared-libasan` from root Make.inc
+ifeq ($(SANITIZE),1)
+ifeq ($(SANITIZE_ADDRESS),1)
+JLDFLAGS += -static-libsan
+endif
+endif
+
+$(BUILDDIR)/$(EXENAME)-debug$(EXE): $(DOBJS) $(LIBFILES_debug) $(BUILDDIR)/$(LIBTARGET)-debug.a $(BUILDDIR)/flmain.dbg.obj | $(BUILDDIR)/flisp.boot
+	@$(call PRINT_LINK, $(CCLD) $(DEBUGFLAGS) $(JLDFLAGS) $(DOBJS) $(BUILDDIR)/flmain.dbg.obj -o $@ $(BUILDDIR)/$(LIBTARGET)-debug.a $(LIBFILES_debug) $(LIBS) $(OSLIBS))
+
+$(BUILDDIR)/$(EXENAME)$(EXE): $(OBJS) $(LIBFILES_release) $(BUILDDIR)/$(LIBTARGET).a $(BUILDDIR)/flmain.o | $(BUILDDIR)/flisp.boot
+	@$(call PRINT_LINK, $(CCLD) $(SHIPFLAGS) $(JLDFLAGS) $(OBJS) $(BUILDDIR)/flmain.o -o $@ $(BUILDDIR)/$(LIBTARGET).a $(LIBFILES_release) $(LIBS) $(OSLIBS))
+
+$(BUILDDIR)/host/Makefile:
+	mkdir -p $(BUILDDIR)/host
+	@# add Makefiles to the build directories for convenience (pointing back to the source location of each)
+	@echo '# -- This file is automatically generated in julia/src/flisp/Makefile -- #' > $@
+	@echo 'BUILDDIR=$(BUILDDIR)/host' >> $@
+	@echo 'BUILDING_HOST_TOOLS=1' >> $@
+	@echo 'include $(SRCDIR)/Makefile' >> $@
+
+$(BUILDDIR)/host/$(EXENAME): $(BUILDDIR)/host/Makefile | ${BUILDDIR}/host/flisp.boot
+	make -C $(BUILDDIR)/host $(EXENAME)
+
+
+$(BUILDDIR)/host/flisp.boot: $(SRCDIR)/flisp.boot | $(BUILDDIR)/host/Makefile
+	cp $< $@
+
+ifneq ($(BUILDDIR),.)
+ifneq ($(BUILDDIR),$(SRCDIR))
+$(BUILDDIR)/flisp.boot: $(SRCDIR)/flisp.boot | $(BUILDDIR)
+	cp $< $@
+endif
+endif
+
+test:
+	$(call spawn,./$(EXENAME)$(EXE)) unittest.lsp
 
 clean:
-	rm -f *.o
-	rm -f *.do
-	rm -f *.a
-	rm -f $(EXENAME)
-	rm -f $(EXENAME)-debug
+	rm -f $(BUILDDIR)/*.o
+	rm -f $(BUILDDIR)/*.dbg.obj
+	rm -f $(BUILDDIR)/*.a
+	rm -f $(BUILDDIR)/$(EXENAME)$(EXE)
+	rm -f $(BUILDDIR)/$(EXENAME)-debug$(EXE)
+	rm -f $(BUILDDIR)/host/*
+
+.PHONY: flisp-deps

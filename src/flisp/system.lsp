@@ -243,7 +243,7 @@
 	((atom? l) (list l))
 	(else (cons (car l) (to-proper (cdr l))))))
 
-(define (map! f lst)
+#;(define (map! f lst)
   (prog1 lst
 	 (while (pair? lst)
 		(set-car! lst (f (car lst)))
@@ -284,7 +284,7 @@
 			      n))))
   (count- f l 0))
 
-(define (foldr f zero lst)
+#;(define (foldr f zero lst)
   (if (null? lst) zero
       (f (car lst) (foldr f zero (cdr lst)))))
 
@@ -308,14 +308,24 @@
 (define (reverse! l) (reverse!- () l))
 
 (define (delete-duplicates lst)
-  (if (atom? lst)
-      lst
-      (let ((elt  (car lst))
-	    (tail (cdr lst)))
-	(if (member elt tail)
-	    (delete-duplicates tail)
-	    (cons elt
-		  (delete-duplicates tail))))))
+  (if (length> lst 20)
+      (let ((t (table)))
+	(let loop ((l lst) (acc '()))
+	  (if (atom? l)
+	      (reverse! acc)
+	      (if (has? t (car l))
+		  (loop (cdr l) acc)
+		  (begin
+		    (put! t (car l) #t)
+		    (loop (cdr l) (cons (car l) acc)))))))
+      (if (atom? lst)
+	  lst
+	  (let ((elt  (car lst))
+		(tail (cdr lst)))
+	    (if (member elt tail)
+		(delete-duplicates tail)
+		(cons elt
+		      (delete-duplicates tail)))))))
 
 ; backquote -------------------------------------------------------------------
 
@@ -327,61 +337,86 @@
            (not (symbol? x)))
       (and (constant? x)
 	   (symbol? x)
-           (eq x (top-level-value x)))))
+           (eq? x (top-level-value x)))))
 
-(define-macro (quasiquote x) (bq-process x))
+(define-macro (quasiquote x) (bq-process x 0))
 
-(define (bq-process x)
-  (define (splice-form? x)
-    (or (and (pair? x) (or (eq? (car x) 'unquote-splicing)
-			   (eq? (car x) 'unquote-nsplicing)))
-	(eq? x 'unquote)))
-  ; bracket without splicing
-  (define (bq-bracket1 x)
-    (if (and (pair? x) (eq? (car x) 'unquote))
-	(cadr x)
-	(bq-process x)))
-  (cond ((self-evaluating? x)
-         (if (vector? x)
-             (let ((body (bq-process (vector->list x))))
-               (if (eq? (car body) 'list)
-                   (cons vector (cdr body))
-		   (list apply vector body)))
-	     x))
-        ((atom? x)                    (list 'quote x))
-        ((eq? (car x) 'quasiquote)    (bq-process (bq-process (cadr x))))
-        ((eq? (car x) 'unquote)       (cadr x))
+(define (splice-form? x)
+  (or (and (pair? x) (or (eq? (car x) 'unquote-splicing)
+                         (eq? (car x) 'unquote-nsplicing)
+                         (and (eq? (car x) 'unquote)
+                              (length> x 2))))
+      (eq? x 'unquote)))
+
+;; bracket without splicing
+(define (bq-bracket1 x d)
+  (if (and (pair? x) (eq? (car x) 'unquote))
+      (if (= d 0)
+          (cadr x)
+          (list cons ''unquote
+                (bq-process (cdr x) (- d 1))))
+      (bq-process x d)))
+
+(define (bq-bracket x d)
+  (cond ((atom? x)  (list list (bq-process x d)))
+        ((eq? (car x) 'unquote)
+         (if (= d 0)
+             (cons list (cdr x))
+             (list list (list cons ''unquote
+                              (bq-process (cdr x) (- d 1))))))
+        ((eq? (car x) 'unquote-splicing)
+         (if (= d 0)
+             (list 'copy-list (cadr x))
+             (list list (list list ''unquote-splicing
+                              (bq-process (cadr x) (- d 1))))))
+        ((eq? (car x) 'unquote-nsplicing)
+         (if (= d 0)
+             (cadr x)
+             (list list (list list ''unquote-nsplicing
+                              (bq-process (cadr x) (- d 1))))))
+        (else  (list list (bq-process x d)))))
+
+(define (bq-process x d)
+  (cond ((symbol? x)  (list 'quote x))
+        ((vector? x)
+         (let ((body (bq-process (vector->list x) d)))
+           (if (eq? (car body) list)
+               (cons vector (cdr body))
+               (list apply vector body))))
+        ((atom? x)  x)
+        ((eq? (car x) 'quasiquote)
+         (list list ''quasiquote (bq-process (cadr x) (+ d 1))))
+        ((eq? (car x) 'unquote)
+         (if (and (= d 0) (length= x 2))
+             (cadr x)
+             (list cons ''unquote (bq-process (cdr x) (- d 1)))))
         ((not (any splice-form? x))
          (let ((lc    (lastcdr x))
-               (forms (map bq-bracket1 x)))
+               (forms (map (lambda (x) (bq-bracket1 x d)) x)))
            (if (null? lc)
-               (cons 'list forms)
-	       (if (null? (cdr forms))
-		   (list cons (car forms) (bq-process lc))
-		   (nconc (cons 'list* forms) (list (bq-process lc)))))))
-        (#t (let ((p x) (q ()))
-	      (while (and (pair? p)
-			  (not (eq? (car p) 'unquote)))
-		     (set! q (cons (bq-bracket (car p)) q))
-		     (set! p (cdr p)))
-	      (let ((forms
-		     (cond ((pair? p) (nreconc q (list (cadr p))))
-			   ((null? p)  (reverse! q))
-			   (#t        (nreconc q (list (bq-process p)))))))
-		(if (null? (cdr forms))
-		    (car forms)
-		    (if (and (length= forms 2)
-			     (length= (car forms) 2)
-			     (eq? list (caar forms)))
-			(list cons (cadar forms) (cadr forms))
-			(cons 'nconc forms))))))))
-
-(define (bq-bracket x)
-  (cond ((atom? x)                        (list list (bq-process x)))
-        ((eq? (car x) 'unquote)           (list list (cadr x)))
-        ((eq? (car x) 'unquote-splicing)  (list 'copy-list (cadr x)))
-        ((eq? (car x) 'unquote-nsplicing) (cadr x))
-        (#t                               (list list (bq-process x)))))
+               (cons list forms)
+               (if (null? (cdr forms))
+                   (list cons (car forms) (bq-process lc d))
+                   (nconc (cons list* forms) (list (bq-process lc d)))))))
+        (else
+         (let loop ((p x) (q ()))
+           (cond ((null? p) ;; proper list
+                  (cons 'nconc (reverse! q)))
+                 ((pair? p)
+                  (cond ((eq? (car p) 'unquote)
+                         ;; (... . ,x)
+                         (cons 'nconc
+                               (nreconc q
+                                        (if (= d 0)
+                                            (cdr p)
+                                            (list (list list ''unquote)
+                                                  (bq-process (cdr p)
+                                                              (- d 1)))))))
+                        (else
+                         (loop (cdr p) (cons (bq-bracket (car p) d) q)))))
+                 (else
+                  ;; (... . x)
+                  (cons 'nconc (reverse! (cons (bq-process p d) q)))))))))
 
 ; standard macros -------------------------------------------------------------
 
@@ -418,7 +453,7 @@
 			    (cdr clause)))
 		    clauses)))))
 
-(define-macro (do vars test-spec . commands)
+#;(define-macro (do vars test-spec . commands)
   (let ((loop (gensym))
 	(test-expr (car test-spec))
 	(vars  (map car  vars))
@@ -462,18 +497,6 @@
 
 (define (iota n) (map-int identity n))
 
-(define (for-each f l . lsts)
-  (define (for-each-n f lsts)
-    (if (pair? (car lsts))
-	(begin (apply f (map car lsts))
-	       (for-each-n f (map cdr lsts)))))
-  (if (null? lsts)
-      (while (pair? l)
-	     (begin (f (car l))
-		    (set! l (cdr l))))
-      (for-each-n f (cons l lsts)))
-  #t)
-
 (define-macro (with-bindings binds . body)
   (let ((vars (map car binds))
 	(vals (map cadr binds))
@@ -493,8 +516,8 @@
   (let ((e (gensym)))
     `(trycatch ,expr
                (lambda (,e) (if (and (pair? ,e)
-                                     (eq (car  ,e) 'thrown-value)
-                                     (eq (cadr ,e) ,tag))
+                                     (eq? (car  ,e) 'thrown-value)
+                                     (eq? (cadr ,e) ,tag))
                                 (caddr ,e)
 				(raise ,e))))))
 
@@ -594,7 +617,7 @@
            (set! l (cons (aref v (- n i)) l))))
     l))
 
-(define (vector.map f v)
+#;(define (vector.map f v)
   (let* ((n (length v))
          (nv (vector.alloc n)))
     (for 0 (- n 1)
@@ -610,14 +633,9 @@
 (define (table.keys t)
   (table.foldl (lambda (k v z) (cons k z))
                () t))
-(define (table.values t)
+#;(define (table.values t)
   (table.foldl (lambda (k v z) (cons v z))
                () t))
-#;(define (table.clone t)
-  (let ((nt (table)))
-    (table.foldl (lambda (k v z) (put! nt k v))
-                 () t)
-    nt))
 #;(define (table.invert t)
   (let ((nt (table)))
     (table.foldl (lambda (k v z) (put! nt v k))
@@ -630,12 +648,7 @@
 
 (define (string.tail s n) (string.sub s (string.inc s 0 n)))
 
-(define *whitespace*
-  (string.encode #array(wchar 9 10 11 12 13 32 133 160 5760 6158 8192
-			      8193 8194 8195 8196 8197 8198 8199 8200
-			      8201 8202 8232 8233 8239 8287 12288)))
-
-(define (string.trim s at-start at-end)
+#;(define (string.trim s at-start at-end)
   (define (trim-start s chars i L)
     (if (and (< i L)
 	     (string.find chars (string.char s i)))
@@ -660,7 +673,7 @@
 		    (set! i (string.inc s i)))))
     (io.tostring! b)))
 
-(define (string.rep s k)
+#;(define (string.rep s k)
   (cond ((< k 4)
 	 (cond ((<= k 0) "")
 	       ((=  k 1) (string s))
@@ -669,8 +682,8 @@
 	((odd? k) (string s (string.rep s (- k 1))))
 	(else     (string.rep (string s s) (/ k 2)))))
 
-(define (string.lpad s n c) (string (string.rep c (- n (string.count s))) s))
-(define (string.rpad s n c) (string s (string.rep c (- n (string.count s)))))
+#;(define (string.lpad s n c) (string (string.rep c (- n (string.count s))) s))
+#;(define (string.rpad s n c) (string s (string.rep c (- n (string.count s)))))
 
 (define (print-to-string v)
   (let ((b (buffer)))
@@ -691,7 +704,7 @@
 (define (macrocall? e) (and (symbol? (car e))
 			    (symbol-syntax (car e))))
 
-(define (macroexpand-1 e)
+#;(define (macroexpand-1 e)
   (if (atom? e) e
       (let ((f (macrocall? e)))
 	(if f (apply f (cdr e))
@@ -700,7 +713,7 @@
 (define (expand e)
   ; symbol resolves to toplevel; i.e. has no shadowing definition
   (define (top? s env) (not (or (bound? s) (assq s env))))
-  
+
   (define (splice-begin body)
     (cond ((atom? body) body)
 	  ((equal? body '((begin)))
@@ -710,9 +723,9 @@
 	   (append (splice-begin (cdar body)) (splice-begin (cdr body))))
 	  (else
 	   (cons (car body) (splice-begin (cdr body))))))
-  
+
   (define *expanded* (list '*expanded*))
-  
+
   (define (expand-body body env)
     (if (atom? body) body
 	(let* ((body  (if (top? 'begin env)
@@ -744,19 +757,19 @@
 			   (set-car! body (cdar body)))
 		       (set! body (cdr body)))
 		ex-nondefs)))))
-  
+
   (define (expand-lambda-list l env)
     (if (atom? l) l
 	(cons (if (and (pair? (car l)) (pair? (cdr (car l))))
 		  (list (caar l) (expand-in (cadar l) env))
 		  (car l))
 	      (expand-lambda-list (cdr l) env))))
-  
+
   (define (l-vars l)
     (cond ((atom? l)       (list l))
 	  ((pair? (car l)) (cons (caar l) (l-vars (cdr l))))
 	  (else            (cons (car l)  (l-vars (cdr l))))))
-  
+
   (define (expand-lambda e env)
     (let ((formals (cadr e))
 	  (name    (lastcdr e))
@@ -766,7 +779,7 @@
 	`(lambda ,(expand-lambda-list formals env)
 	   ,.(expand-body body env)
 	   . ,name))))
-  
+
   (define (expand-define e env)
     (if (or (null? (cdr e)) (atom? (cadr e)))
 	(if (null? (cddr e))
@@ -779,7 +792,7 @@
 	  (let ((env   (nconc (map list vars) env)))
 	    `(define ,(cons name (expand-lambda-list formals env))
 	       ,.(expand-body body env))))))
-  
+
   (define (expand-let-syntax e env)
     (let ((binds (cadr e)))
       (cons 'begin
@@ -792,12 +805,12 @@
 				       env))
 			       binds)
 			  env)))))
-  
+
   ; given let-syntax definition environment (menv) and environment
   ; at the point of the macro use (lenv), return the environment to
   ; expand the macro use in. TODO
   (define (local-expansion-env menv lenv) menv)
-  
+
   (define (expand-in e env)
     (if (atom? e) e
 	(let* ((head (car e))

@@ -1,5 +1,59 @@
-#ifndef DTYPES_H
-#define DTYPES_H
+// This file is a part of Julia. License is MIT: https://julialang.org/license
+
+#ifndef JL_DTYPES_H
+#define JL_DTYPES_H
+
+#include <stddef.h>
+#include <stddef.h> // double include of stddef.h fixes #3421
+#include <stdint.h>
+#include <string.h> // memcpy
+#include <errno.h>
+#include <stdlib.h>
+#include <stdio.h>
+#include <math.h> // NAN and INF constants
+
+#include "platform.h"
+#include "analyzer_annotations.h"
+
+#if !defined(_OS_WINDOWS_)
+#include <inttypes.h>
+#endif
+
+#if defined(_OS_WINDOWS_)
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <sys/stat.h>
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+
+#if defined(_COMPILER_MICROSOFT_) && !defined(_SSIZE_T_) && !defined(_SSIZE_T_DEFINED)
+
+/* See https://github.com/JuliaLang/julia/pull/44587 */
+typedef intptr_t ssize_t;
+#define SSIZE_MAX INTPTR_MAX
+#define _SSIZE_T_
+#define _SSIZE_T_DEFINED
+
+#endif /* defined(_COMPILER_MICROSOFT_) && !defined(_SSIZE_T_) && !defined(_SSIZE_T_DEFINED) */
+
+#if !defined(_COMPILER_GCC_)
+
+#define strtoull                                            _strtoui64
+#define strtoll                                             _strtoi64
+#define strcasecmp                                          _stricmp
+#define strncasecmp                                         _strnicmp
+#define snprintf                                            _snprintf
+#define stat                                                _stat
+
+#define STDIN_FILENO                                        0
+#define STDOUT_FILENO                                       1
+#define STDERR_FILENO                                       2
+
+#endif /* !_COMPILER_GCC_ */
+
+#endif /* _OS_WINDOWS_ */
+
 
 /*
   This file defines sane integer types for our target platforms. This
@@ -16,140 +70,166 @@
   We assume the LP64 convention for 64-bit platforms.
 */
 
-#ifdef WIN32
-#define STDCALL __stdcall
-# ifdef IMPORT_EXPORTS
-#  define DLLEXPORT __declspec(dllimport)
-# else
-#  define DLLEXPORT __declspec(dllexport)
+#ifdef _OS_WINDOWS_
+#define STDCALL  __stdcall
+# ifdef JL_LIBRARY_EXPORTS_INTERNAL
+#  define JL_DLLEXPORT __declspec(dllexport)
 # endif
+# ifdef JL_LIBRARY_EXPORTS_CODEGEN
+#  define JL_DLLEXPORT_CODEGEN __declspec(dllexport)
+# endif
+#define JL_HIDDEN
+#define JL_DLLIMPORT   __declspec(dllimport)
 #else
 #define STDCALL
-#define DLLEXPORT __attribute__ ((visibility("default")))
+#define JL_DLLIMPORT __attribute__ ((visibility("default")))
+#define JL_HIDDEN __attribute__ ((visibility("hidden")))
+#endif
+#ifndef JL_DLLEXPORT
+# define JL_DLLEXPORT JL_DLLIMPORT
+#endif
+#ifndef JL_DLLEXPORT_CODEGEN
+# define JL_DLLEXPORT_CODEGEN JL_DLLIMPORT
 #endif
 
-#ifdef __linux__
-#include <features.h>
+#ifdef _OS_LINUX_
 #include <endian.h>
 #define LITTLE_ENDIAN  __LITTLE_ENDIAN
 #define BIG_ENDIAN     __BIG_ENDIAN
-#define PDP_ENDIAN     __PDP_ENDIAN
 #define BYTE_ORDER     __BYTE_ORDER
 #endif
 
-#ifdef __APPLE__
+#if defined(__APPLE__) || defined(__FreeBSD__) || defined(__OpenBSD__)
 #include <machine/endian.h>
 #define __LITTLE_ENDIAN  LITTLE_ENDIAN
 #define __BIG_ENDIAN     BIG_ENDIAN
-#define __PDP_ENDIAN     PDP_ENDIAN
 #define __BYTE_ORDER     BYTE_ORDER
 #endif
 
-#ifdef WIN32
-#define __LITTLE_ENDIAN	1234
-#define __BIG_ENDIAN	4321
-#define __PDP_ENDIAN	3412
+#ifdef _OS_WINDOWS_
+#define __LITTLE_ENDIAN    1234
+#define __BIG_ENDIAN       4321
 #define __BYTE_ORDER       __LITTLE_ENDIAN
 #define __FLOAT_WORD_ORDER __LITTLE_ENDIAN
-#define LITTLE_ENDIAN  __LITTLE_ENDIAN
-#define BIG_ENDIAN     __BIG_ENDIAN
-#define PDP_ENDIAN     __PDP_ENDIAN
-#define BYTE_ORDER     __BYTE_ORDER
-#endif
-
-#if (__STDC_VERSION__ >= 199901L) || defined(__GNUG__)
-// argument counting macros for C99
-#define VA_ARG_N(_1, _2, _3, _4, _5, _6, _7, _8, _9,_10,  \
-                 _11,_12,_13,_14,_15,_16,_17,_18,_19,_20, \
-                 _21,_22,_23,_24,_25,_26,_27,_28,_29,_30, \
-                 _31,_32,_33,_34,_35,_36,_37,_38,_39,_40, \
-                 _41,_42,_43,_44,_45,_46,_47,_48,_49,_50, \
-                 _51,_52,_53,_54,_55,_56,_57,_58,_59,_60, \
-                 _61,_62,_63,N,...) N
-#define VA_RSEQ_N() 63,62,61,60,59,58,57,56,55,54,53,52,51,50, \
-                    49,48,47,46,45,44,43,42,41,40,39,38,37,36, \
-                    35,34,33,32,31,30,29,28,27,26,25,24,23,22, \
-                    21,20,19,18,17,16,15,14,13,12,11,10,9,8,7,6,5,4,3,2,1,0
-#define VA_NARG_(...) VA_ARG_N(__VA_ARGS__)
-#define VA_NARG(...) VA_NARG_(__VA_ARGS__,VA_RSEQ_N())
+#define LITTLE_ENDIAN      __LITTLE_ENDIAN
+#define BIG_ENDIAN         __BIG_ENDIAN
+#define BYTE_ORDER         __BYTE_ORDER
 #endif
 
 #define LLT_ALLOC(n) malloc(n)
 #define LLT_REALLOC(p,n) realloc((p),(n))
 #define LLT_FREE(x) free(x)
 
-typedef int bool_t;
+#define STATIC_INLINE static inline
+#define FORCE_INLINE static inline __attribute__((always_inline))
 
-#if defined(__INTEL_COMPILER) && defined(WIN32)
-# define STATIC_INLINE static
-# define INLINE
-# ifdef __LP64__
-typedef unsigned long size_t;
+#if defined(_OS_WINDOWS_) && !defined(_COMPILER_GCC_)
+#  define NOINLINE __declspec(noinline)
+#  define NOINLINE_DECL(f) __declspec(noinline) f
+#else
+#  define NOINLINE __attribute__((noinline))
+#  define NOINLINE_DECL(f) f __attribute__((noinline))
+#endif
+
+#ifdef _COMPILER_MICROSOFT_
+# ifdef _P64
+#  define JL_ATTRIBUTE_ALIGN_PTRSIZE(x) __declspec(align(8)) x
 # else
-typedef unsigned int size_t;
+#  define JL_ATTRIBUTE_ALIGN_PTRSIZE(x) __declspec(align(4)) x
 # endif
+#elif defined(__GNUC__)
+#  define JL_ATTRIBUTE_ALIGN_PTRSIZE(x) x __attribute__ ((aligned (sizeof(void*))))
 #else
-# define STATIC_INLINE static inline
-# define INLINE inline
+#  define JL_ATTRIBUTE_ALIGN_PTRSIZE(x)
 #endif
 
+#ifdef __has_builtin
+#  define jl_has_builtin(x) __has_builtin(x)
+#else
+#  define jl_has_builtin(x) 0
+#endif
+
+#if jl_has_builtin(__builtin_assume)
+#define jl_assume(cond) (__extension__ ({               \
+                __typeof__(cond) cond_ = (cond);        \
+                __builtin_assume(!!(cond_));            \
+                cond_;                                  \
+            }))
+#elif defined(__GNUC__)
+static inline void jl_assume_(int cond)
+{
+    if (!cond) {
+        __builtin_unreachable();
+    }
+}
+#define jl_assume(cond) (__extension__ ({               \
+                __typeof__(cond) cond_ = (cond);        \
+                jl_assume_(!!(cond_));                  \
+                cond_;                                  \
+            }))
+#else
+#define jl_assume(cond) (cond)
+#endif
+
+#if jl_has_builtin(__builtin_assume_aligned) || defined(_COMPILER_GCC_)
+#define jl_assume_aligned(ptr, align) __builtin_assume_aligned(ptr, align)
+#elif defined(__GNUC__)
+#define jl_assume_aligned(ptr, align) (__extension__ ({         \
+                __typeof__(ptr) ptr_ = (ptr);                   \
+                jl_assume(((uintptr_t)ptr) % (align) == 0);     \
+                ptr_;                                           \
+            }))
+#elif defined(__cplusplus)
+template<typename T>
+static inline T
+jl_assume_aligned(T ptr, unsigned align)
+{
+    (void)jl_assume(((uintptr_t)ptr) % align == 0);
+    return ptr;
+}
+#else
+#define jl_assume_aligned(ptr, align) (ptr)
+#endif
+
+typedef int bool_t;
 typedef unsigned char  byte_t;   /* 1 byte */
-#if defined(WIN32)
-typedef short int16_t;
-typedef int int32_t;
-typedef long long int64_t;
-typedef unsigned char u_int8_t;
-typedef unsigned short u_int16_t;
-typedef unsigned int u_int32_t;
-#ifdef __LP64__
-typedef unsigned long u_int64_t;
-#else
-typedef unsigned long long u_int64_t;
-#endif
-#ifdef __INTEL_COMPILER
-typedef signed char int8_t;
-typedef short int16_t;
-typedef int int32_t;
-#endif
-#else
-#include <sys/types.h>
-#endif
 
-#ifdef __LP64__
+#ifdef _P64
 #define TOP_BIT 0x8000000000000000
 #define NBITS 64
-typedef unsigned long uint_t;  // preferred int type on platform
-typedef long int_t;
-typedef int64_t offset_t;
-typedef u_int64_t index_t;
-typedef int64_t ptrint_t; // pointer-size int
-typedef u_int64_t u_ptrint_t;
+typedef uint64_t uint_t;  // preferred int type on platform
+typedef int64_t int_t;
 #else
 #define TOP_BIT 0x80000000
 #define NBITS 32
-typedef unsigned long uint_t;
-typedef long int_t;
-typedef int32_t offset_t;
-typedef u_int32_t index_t;
-typedef int32_t ptrint_t;
-typedef u_int32_t u_ptrint_t;
+typedef uint32_t uint_t;
+typedef int32_t int_t;
 #endif
 
-typedef u_int8_t  uint8_t;
-typedef u_int16_t uint16_t;
-typedef u_int32_t uint32_t;
-typedef u_int64_t uint64_t;
-typedef u_ptrint_t uptrint_t;
+STATIC_INLINE unsigned int next_power_of_two(unsigned int val) JL_NOTSAFEPOINT
+{
+    /* this function taken from libuv src/unix/core.c */
+    val -= 1;
+    val |= val >> 1;
+    val |= val >> 2;
+    val |= val >> 4;
+    val |= val >> 8;
+    val |= val >> 16;
+    val += 1;
+    return val;
+}
 
-#define LLT_ALIGN(x, sz) (((x) + (sz-1)) & (-sz))
+#define LLT_ALIGN(x, sz) (((x) + (sz)-1) & ~((sz)-1))
 
 // branch prediction annotations
 #ifdef __GNUC__
 #define __unlikely(x) __builtin_expect(!!(x), 0)
 #define __likely(x)   __builtin_expect(!!(x), 1)
+#define JL_EXTENSION __extension__
 #else
 #define __unlikely(x) (x)
 #define __likely(x)   (x)
+#define JL_EXTENSION
 #endif
 
 #define DBL_MAXINT 9007199254740992LL
@@ -163,40 +243,148 @@ typedef u_ptrint_t uptrint_t;
 #define S32_MIN    (-S32_MAX - 1L)
 #define BIT31      0x80000000
 
-#define DBL_EPSILON      2.2204460492503131e-16
-#define FLT_EPSILON      1.192092896e-7
-#define DBL_MAX          1.7976931348623157e+308
-#define DBL_MIN          2.2250738585072014e-308
-#define FLT_MAX          3.402823466e+38
-#define FLT_MIN          1.175494351e-38
-#define LOG2_10          3.3219280948873626
-#define rel_zero(a, b) (fabs((a)/(b)) < DBL_EPSILON)
-#define sign_bit(r) ((*(int64_t*)&(r)) & BIT63)
-#define LABS(n) (((n)^((n)>>(NBITS-1))) - ((n)>>(NBITS-1)))
-#define NBABS(n,nb) (((n)^((n)>>((nb)-1))) - ((n)>>((nb)-1)))
-#define DFINITE(d) (((*(int64_t*)&(d))&0x7ff0000000000000LL)!=0x7ff0000000000000LL)
-#define DNAN(d) ((d)!=(d))
-
-extern double D_PNAN;
-extern double D_NNAN;
-extern double D_PINF;
-extern double D_NINF;
-extern float  F_PNAN;
-extern float  F_NNAN;
-extern float  F_PINF;
-extern float  F_NINF;
+#define D_PNAN ((double)+NAN)
+#define D_NNAN ((double)-NAN)
+#define D_PINF ((double)+INFINITY)
+#define D_NINF ((double)-INFINITY)
+#define F_PNAN ((float)+NAN)
+#define F_NNAN ((float)-NAN)
+#define F_PINF ((float)+INFINITY)
+#define F_NINF ((float)-INFINITY)
 
 typedef enum { T_INT8, T_UINT8, T_INT16, T_UINT16, T_INT32, T_UINT32,
                T_INT64, T_UINT64, T_FLOAT, T_DOUBLE } numerictype_t;
 
 #define N_NUMTYPES ((int)T_DOUBLE+1)
 
-#ifdef __LP64__
-# define T_LONG T_INT64
-# define T_ULONG T_UINT64
+#ifdef _P64
+# define T_PTRDIFF T_INT64
+# define T_SIZE T_UINT64
 #else
-# define T_LONG T_INT32
-# define T_ULONG T_UINT32
+# define T_PTRDIFF T_INT32
+# define T_SIZE T_UINT32
 #endif
 
+#if defined(__GNUC__) && __GNUC__ >= 7
+#define JL_FALLTHROUGH __attribute__((fallthrough))
+#elif defined(__cplusplus) && defined(__clang_major__) && \
+    defined(__clang_minor__) && (__clang_major__ > 4 || __clang_minor__ >= 5)
+// We require at least clang 3.x
+#define JL_FALLTHROUGH [[clang::fallthrough]]
+#else
+#define JL_FALLTHROUGH
 #endif
+
+#if defined(__GNUC__)
+#define JL_UNUSED __attribute__((__unused__))
+#else
+#define JL_UNUSED
+#endif
+
+STATIC_INLINE double jl_load_unaligned_f64(const void *ptr) JL_NOTSAFEPOINT
+{
+    double val;
+    memcpy(&val, ptr, sizeof(double));
+    return val;
+}
+
+STATIC_INLINE uint64_t jl_load_unaligned_i64(const void *ptr) JL_NOTSAFEPOINT
+{
+    uint64_t val;
+    memcpy(&val, ptr, sizeof(uint64_t));
+    return val;
+}
+
+STATIC_INLINE double jl_load_ptraligned_f64(const void *ptr) JL_NOTSAFEPOINT
+{
+    double val;
+    memcpy(&val, jl_assume_aligned(ptr, sizeof(void*)), sizeof(double));
+    return val;
+}
+
+STATIC_INLINE uint64_t jl_load_ptraligned_i64(const void *ptr) JL_NOTSAFEPOINT
+{
+    uint64_t val;
+    memcpy(&val, jl_assume_aligned(ptr, sizeof(void*)), sizeof(uint64_t));
+    return val;
+}
+
+
+STATIC_INLINE uint32_t jl_load_unaligned_i32(const void *ptr) JL_NOTSAFEPOINT
+{
+    uint32_t val;
+    memcpy(&val, ptr, 4);
+    return val;
+}
+STATIC_INLINE uint16_t jl_load_unaligned_i16(const void *ptr) JL_NOTSAFEPOINT
+{
+    uint16_t val;
+    memcpy(&val, ptr, 2);
+    return val;
+}
+
+STATIC_INLINE void jl_store_unaligned_i64(void *ptr, uint64_t val) JL_NOTSAFEPOINT
+{
+    memcpy(ptr, &val, 8);
+}
+STATIC_INLINE void jl_store_unaligned_i32(void *ptr, uint32_t val) JL_NOTSAFEPOINT
+{
+    memcpy(ptr, &val, 4);
+}
+STATIC_INLINE void jl_store_unaligned_i16(void *ptr, uint16_t val) JL_NOTSAFEPOINT
+{
+    memcpy(ptr, &val, 2);
+}
+
+STATIC_INLINE void *calloc_s(size_t sz) JL_NOTSAFEPOINT {
+    int last_errno = errno;
+#ifdef _OS_WINDOWS_
+    DWORD last_error = GetLastError();
+#endif
+    void *p = calloc(sz == 0 ? 1 : sz, 1);
+    if (p == NULL) {
+        perror("(julia) calloc");
+        abort();
+    }
+#ifdef _OS_WINDOWS_
+    SetLastError(last_error);
+#endif
+    errno = last_errno;
+    return p;
+}
+
+STATIC_INLINE void *malloc_s(size_t sz) JL_NOTSAFEPOINT {
+    int last_errno = errno;
+#ifdef _OS_WINDOWS_
+    DWORD last_error = GetLastError();
+#endif
+    void *p = malloc(sz == 0 ? 1 : sz);
+    if (p == NULL) {
+        perror("(julia) malloc");
+        abort();
+    }
+#ifdef _OS_WINDOWS_
+    SetLastError(last_error);
+#endif
+    errno = last_errno;
+    return p;
+}
+
+STATIC_INLINE void *realloc_s(void *p, size_t sz) JL_NOTSAFEPOINT {
+    int last_errno = errno;
+#ifdef _OS_WINDOWS_
+    DWORD last_error = GetLastError();
+#endif
+    p = realloc(p, sz == 0 ? 1 : sz);
+    if (p == NULL) {
+        perror("(julia) realloc");
+        abort();
+    }
+#ifdef _OS_WINDOWS_
+    SetLastError(last_error);
+#endif
+    errno = last_errno;
+    return p;
+}
+
+#endif /* DTYPES_H */

@@ -1,3 +1,5 @@
+// This file is a part of Julia. License is MIT: https://julialang.org/license
+
 /*
   pointer hash table
   optimized for storing info about particular values
@@ -17,4 +19,12 @@
 
 #include "htable.inc"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 HTIMPL(ptrhash, inthash, OP_EQ)
+
+#ifdef __cplusplus
+}
+#endif

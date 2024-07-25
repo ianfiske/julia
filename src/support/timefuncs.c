@@ -1,74 +1,43 @@
-#include <stdlib.h>
-#include <stdio.h>
-#include <string.h>
-#include <time.h>
+// This file is a part of Julia. License is MIT: https://julialang.org/license
+
 #include <assert.h>
-#include <errno.h>
-#include <limits.h>
-#include <sys/stat.h>
-#include <sys/types.h>
 
 #include "dtypes.h"
 
-#ifdef WIN32
-#include <malloc.h>
+#if defined(_OS_WINDOWS_)
 #include <sys/timeb.h>
-#include <windows.h>
 #else
 #include <sys/time.h>
-#include <sys/poll.h>
-#include <unistd.h>
+#include <sys/select.h>
 #endif
 
 #include "timefuncs.h"
 
-#ifdef WIN32
-double floattime(void)
-{
-    struct timeb tstruct;
-
-    ftime(&tstruct);
-    return (double)tstruct.time + (double)tstruct.millitm/1.0e3;
-}
-#else
-double tv2float(struct timeval *tv)
-{
-    return (double)tv->tv_sec + (double)tv->tv_usec/1.0e6;
-}
-
-double diff_time(struct timeval *tv1, struct timeval *tv2)
-{
-    return tv2float(tv1) - tv2float(tv2);
-}
+#ifdef __cplusplus
+extern "C" {
 #endif
 
-// return as many bits of system randomness as we can get our hands on
-u_int64_t i64time(void)
+JL_DLLEXPORT int jl_gettimeofday(struct jl_timeval *jtv)
 {
-    u_int64_t a;
-#ifdef WIN32
-    struct timeb tstruct;
-    ftime(&tstruct);
-    a = (((u_int64_t)tstruct.time)<<32) + (u_int64_t)tstruct.millitm;
+#if defined(_OS_WINDOWS_)
+    struct __timeb64 tb;
+    errno_t code = _ftime64_s(&tb);
+    jtv->sec = tb.time;
+    jtv->usec = tb.millitm * 1000;
 #else
-    struct timeval now;
-    gettimeofday(&now, NULL);
-    a = (((u_int64_t)now.tv_sec)<<32) + (u_int64_t)now.tv_usec;
+    struct timeval tv;
+    int code = gettimeofday(&tv, NULL);
+    jtv->sec = tv.tv_sec;
+    jtv->usec = tv.tv_usec;
 #endif
-
-    return a;
+    return code;
 }
 
-double clock_now(void)
+JL_DLLEXPORT double jl_clock_now(void)
 {
-#ifdef WIN32
-    return floattime();
-#else
-    struct timeval now;
-
-    gettimeofday(&now, NULL);
-    return tv2float(&now);
-#endif
+    struct jl_timeval now;
+    jl_gettimeofday(&now);
+    return now.sec + now.usec * 1e-6;
 }
 
 void sleep_ms(int ms)
@@ -76,13 +45,18 @@ void sleep_ms(int ms)
     if (ms == 0)
         return;
 
-#ifdef WIN32
+#if defined(_OS_WINDOWS_)
     Sleep(ms);
 #else
     struct timeval timeout;
 
-    timeout.tv_sec = ms/1000;
+    timeout.tv_sec = ms / 1000;
     timeout.tv_usec = (ms % 1000) * 1000;
+
     select(0, NULL, NULL, NULL, &timeout);
 #endif
 }
+
+#ifdef __cplusplus
+}
+#endif

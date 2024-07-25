@@ -1,46 +1,62 @@
-#ifndef IOS_H
-#define IOS_H
+// This file is a part of Julia. License is MIT: https://julialang.org/license
+
+#ifndef JL_IOS_H
+#define JL_IOS_H
 
 #include <stdarg.h>
-#include <pthread.h>
-#include "../../deps/libuv/include/uv.h"
+#include <sys/types.h>
+#include "analyzer_annotations.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 // this flag controls when data actually moves out to the underlying I/O
 // channel. memory streams are a special case of this where the data
 // never moves out.
 
 //make it compatible with UV Handles
-typedef enum { bm_none=UV_HANDLE_TYPE_MAX+1, bm_line, bm_block, bm_mem } bufmode_t;
-
+typedef enum { bm_none=1000, bm_line, bm_block, bm_mem } bufmode_t;
 typedef enum { bst_none, bst_rd, bst_wr } bufstate_t;
 
-#define IOS_INLSIZE 54
-#define IOS_BUFSIZE 131072
+#define IOS_INLSIZE 83
+#define IOS_BUFSIZE 32768
 
-typedef struct {
+#ifdef _P64
+#define IF_P64(x,y) x
+#else
+#define IF_P64(x,y) y
+#endif
+
+// We allow ios_t as a cvalue in flisp, which only guarantees pointer
+// alignment. Make sure the compiler knows.
+JL_ATTRIBUTE_ALIGN_PTRSIZE(typedef struct {
     // the state only indicates where the underlying file position is relative
     // to the buffer. reading: at the end. writing: at the beginning.
     // in general, you can do any operation in any state.
     char *buf;        // start of buffer
-    bufmode_t bm;
 
-    int errcode;
-
+    IF_P64(int64_t userdata;, int errcode;)
+    bufmode_t bm;     // bm must be at same offset as type field of uv_stream_s
     bufstate_t state;
 
-    off_t maxsize;    // space allocated to buffer
-    off_t size;       // length of valid data in buf, >=ndirty
-    off_t bpos;       // current position in buffer
-    off_t ndirty;     // # bytes at &buf[0] that need to be written
+    int64_t maxsize;    // space allocated to buffer
+    int64_t size;       // length of valid data in buf, >=ndirty
+    int64_t bpos;       // current position in buffer
+    int64_t ndirty;     // # bytes at &buf[0] that need to be written
 
-    off_t fpos;       // cached file pos
+    int64_t fpos;       // cached file pos
     size_t lineno;    // current line number
+    size_t u_colno;     // current column number (in Unicode charwidths)
+
+    IF_P64(int errcode;, int64_t userdata;)
 
     // pointer-size integer to support platforms where it might have
     // to be a pointer
     long fd;
 
-    unsigned char readonly:1;
+    unsigned char readable:1;
+    unsigned char writable:1;
     unsigned char ownbuf:1;
     unsigned char ownfd:1;
     unsigned char _eof:1;
@@ -58,85 +74,80 @@ typedef struct {
     // request durable writes (fsync)
     // unsigned char durable:1;
 
-    unsigned char mutex_initialized:1;
+    // this declares that the buffer should not be (re-)alloc'd when
+    // attempting to write beyond its current maxsize.
+    unsigned char growable:1;
 
-    int64_t userdata;
-    pthread_mutex_t mutex;
-
-    // todo: mutex
     char local[IOS_INLSIZE];
-} ios_t;
+} ios_t);
 
+#undef IF_P64
+
+extern void (*ios_set_io_wait_func)(int);
 /* low-level interface functions */
-DLLEXPORT size_t ios_read(ios_t *s, char *dest, size_t n);
-DLLEXPORT size_t ios_readall(ios_t *s, char *dest, size_t n);
-DLLEXPORT size_t ios_write(ios_t *s, const char *data, size_t n);
-DLLEXPORT off_t ios_seek(ios_t *s, off_t pos);   // absolute seek
-DLLEXPORT off_t ios_seek_end(ios_t *s);
-DLLEXPORT off_t ios_skip(ios_t *s, off_t offs);  // relative seek
-DLLEXPORT off_t ios_pos(ios_t *s);  // get current position
-DLLEXPORT size_t ios_trunc(ios_t *s, size_t size);
-DLLEXPORT int ios_eof(ios_t *s);
-DLLEXPORT int ios_flush(ios_t *s);
-DLLEXPORT void ios_close(ios_t *s);
-DLLEXPORT char *ios_takebuf(ios_t *s, size_t *psize);  // release buffer to caller
+JL_DLLEXPORT size_t ios_read(ios_t *s, char *dest, size_t n) JL_NOTSAFEPOINT;
+JL_DLLEXPORT size_t ios_readall(ios_t *s, char *dest, size_t n) JL_NOTSAFEPOINT;
+JL_DLLEXPORT size_t ios_write(ios_t *s, const char *data, size_t n) JL_NOTSAFEPOINT;
+JL_DLLEXPORT int64_t ios_seek(ios_t *s, int64_t pos) JL_NOTSAFEPOINT; // absolute seek
+JL_DLLEXPORT int64_t ios_seek_end(ios_t *s) JL_NOTSAFEPOINT;
+JL_DLLEXPORT int64_t ios_skip(ios_t *s, int64_t offs);  // relative seek
+JL_DLLEXPORT int64_t ios_pos(ios_t *s) JL_NOTSAFEPOINT;  // get current position
+JL_DLLEXPORT int64_t ios_filesize(ios_t *s);
+JL_DLLEXPORT int ios_trunc(ios_t *s, size_t size) JL_NOTSAFEPOINT;
+JL_DLLEXPORT int ios_eof(ios_t *s);
+JL_DLLEXPORT int ios_eof_blocking(ios_t *s);
+JL_DLLEXPORT int ios_flush(ios_t *s);
+JL_DLLEXPORT int ios_close(ios_t *s) JL_NOTSAFEPOINT;
+JL_DLLEXPORT int ios_isopen(ios_t *s);
+JL_DLLEXPORT char *ios_take_buffer(ios_t *s, size_t *psize);  // nul terminate and release buffer to caller
 // set buffer space to use
-DLLEXPORT int ios_setbuf(ios_t *s, char *buf, size_t size, int own);
-DLLEXPORT int ios_bufmode(ios_t *s, bufmode_t mode);
-DLLEXPORT void ios_set_readonly(ios_t *s);
-DLLEXPORT size_t ios_copy(ios_t *to, ios_t *from, size_t nbytes);
-DLLEXPORT size_t ios_copyall(ios_t *to, ios_t *from);
-DLLEXPORT size_t ios_copyuntil(ios_t *to, ios_t *from, char delim);
+JL_DLLEXPORT int ios_setbuf(ios_t *s, char *buf, size_t size, int own) JL_NOTSAFEPOINT;
+JL_DLLEXPORT int ios_bufmode(ios_t *s, bufmode_t mode) JL_NOTSAFEPOINT;
+JL_DLLEXPORT int ios_get_readable(ios_t *s);
+JL_DLLEXPORT int ios_get_writable(ios_t *s);
+JL_DLLEXPORT void ios_set_readonly(ios_t *s);
+JL_DLLEXPORT size_t ios_copy(ios_t *to, ios_t *from, size_t nbytes);
+JL_DLLEXPORT size_t ios_copyall(ios_t *to, ios_t *from);
+JL_DLLEXPORT size_t ios_copyuntil(ios_t *to, ios_t *from, char delim, int keep) JL_NOTSAFEPOINT;
+JL_DLLEXPORT size_t ios_nchomp(ios_t *from, size_t ntowrite);
 // ensure at least n bytes are buffered if possible. returns # available.
-DLLEXPORT size_t ios_readprep(ios_t *from, size_t n);
-//void ios_lock(ios_t *s);
-//int ios_trylock(ios_t *s);
-//int ios_unlock(ios_t *s);
+JL_DLLEXPORT size_t ios_readprep(ios_t *from, size_t n);
+// fill the buffer and determine whether it contains the whole rest of the file
+JL_DLLEXPORT ssize_t ios_fillbuf(ios_t *s);
 
 /* stream creation */
-DLLEXPORT
-ios_t *ios_file(ios_t *s, char *fname, int rd, int wr, int create, int trunc);
-DLLEXPORT ios_t *ios_mem(ios_t *s, size_t initsize);
+JL_DLLEXPORT
+ios_t *ios_file(ios_t *s, const char *fname, int rd, int wr, int create, int trunc) JL_NOTSAFEPOINT;
+JL_DLLEXPORT ios_t *ios_mkstemp(ios_t *f, char *fname);
+JL_DLLEXPORT ios_t *ios_mem(ios_t *s, size_t initsize) JL_NOTSAFEPOINT;
 ios_t *ios_str(ios_t *s, char *str);
 ios_t *ios_static_buffer(ios_t *s, char *buf, size_t sz);
-DLLEXPORT ios_t *ios_fd(ios_t *s, long fd, int isfile, int own);
+JL_DLLEXPORT ios_t *ios_fd(ios_t *s, long fd, int isfile, int own);
 // todo: ios_socket
-extern DLLEXPORT ios_t *ios_stdin;
-extern DLLEXPORT ios_t *ios_stdout;
-extern DLLEXPORT ios_t *ios_stderr;
+extern JL_DLLEXPORT ios_t *ios_stdin;
+extern JL_DLLEXPORT ios_t *ios_stdout;
+extern JL_DLLEXPORT ios_t *ios_stderr;
 void ios_init_stdstreams(void);
 
 /* high-level functions - output */
-int ios_putnum(ios_t *s, char *data, uint32_t type);
-int ios_putint(ios_t *s, int n);
-DLLEXPORT int ios_pututf8(ios_t *s, uint32_t wc);
-int ios_putstringz(ios_t *s, char *str, bool_t do_write_nulterm);
-DLLEXPORT int ios_printf(ios_t *s, const char *format, ...);
-DLLEXPORT int ios_vprintf(ios_t *s, const char *format, va_list args);
+JL_DLLEXPORT int ios_pututf8(ios_t *s, uint32_t wc);
+JL_DLLEXPORT int ios_printf(ios_t *s, const char *format, ...) JL_NOTSAFEPOINT;
+JL_DLLEXPORT int ios_vprintf(ios_t *s, const char *format, va_list args) JL_NOTSAFEPOINT;
 
 /* high-level stream functions - input */
-int ios_getnum(ios_t *s, char *data, uint32_t type);
-DLLEXPORT int ios_getutf8(ios_t *s, uint32_t *pwc);
-DLLEXPORT int ios_peekutf8(ios_t *s, uint32_t *pwc);
-int ios_ungetutf8(ios_t *s, uint32_t wc);
-//int ios_getstringz(ios_t *dest, ios_t *src);
-//int ios_getstringn(ios_t *dest, ios_t *src, size_t nchars);
-//int ios_getline(ios_t *s, char **pbuf, size_t *psz);
-DLLEXPORT char *ios_readline(ios_t *s);
+JL_DLLEXPORT int ios_getutf8(ios_t *s, uint32_t *pwc);
+JL_DLLEXPORT int ios_peekutf8(ios_t *s, uint32_t *pwc);
+JL_DLLEXPORT char *ios_readline(ios_t *s) JL_NOTSAFEPOINT;
 
 // discard data buffered for reading
-DLLEXPORT void ios_purge(ios_t *s);
-
-// seek by utf8 sequence increments
-int ios_nextutf8(ios_t *s);
-int ios_prevutf8(ios_t *s);
+JL_DLLEXPORT void ios_purge(ios_t *s);
 
 /* stdio-style functions */
 #define IOS_EOF (-1)
-DLLEXPORT int ios_putc(int c, ios_t *s);
+JL_DLLEXPORT int ios_putc(int c, ios_t *s);
 //wint_t ios_putwc(ios_t *s, wchar_t wc);
-DLLEXPORT int ios_getc(ios_t *s);
-int ios_peekc(ios_t *s);
+JL_DLLEXPORT int ios_getc(ios_t *s);
+JL_DLLEXPORT int ios_peekc(ios_t *s);
 //wint_t ios_getwc(ios_t *s);
 int ios_ungetc(int c, ios_t *s);
 //wint_t ios_ungetwc(ios_t *s, wint_t wc);
@@ -211,5 +222,9 @@ int ios_ungetc(int c, ios_t *s);
   as optimizations, we do no writing if the buffer isn't "dirty", and we
   do no reading if the data will only be overwritten.
 */
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

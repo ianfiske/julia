@@ -1,270 +1,154 @@
-module Base
+# This file is a part of Julia. License is MIT: https://julialang.org/license
 
-include("export.jl")
+Core.include(Main, "Base.jl")
 
-if false
-    # simple print definitions for debugging. enable these if something
-    # goes wrong during bootstrap before printing code is available.
-    length(a::Array) = arraylen(a)
-    print(x) = print(stdout_stream, x)
-    show(x) = show(stdout_stream, x)
-    write(io, a::Array{Uint8,1}) =
-        ccall(:ios_write, Uint, (Ptr{Void}, Ptr{Void}, Uint),
-              io.ios, a, length(a))
-    print(io, s::Symbol) = ccall(:jl_print_symbol, Void, (Ptr{Void},Any,),
-                                 io.ios, s)
-    print(io, s::ASCIIString) = (write(io, s.data);nothing)
-    print(io, x) = show(io, x)
-    println(io, x) = (print(io, x); print(io, "\n"))
-    show(io, x) = ccall(:jl_show_any, Void, (Any, Any,), io, x)
-    show(io, s::ASCIIString) = (write(io, s.data);nothing)
-    show(io, s::Symbol) = print(io, s)
-    show(io, b::Bool) = print(io, b ? "true" : "false")
-    show(io, n::Int64) = ccall(:jl_print_int64, Void, (Ptr{Void}, Int64,), io, n)
-    show(io, n::Integer)  = show(io, int64(n))
-    print(io, a...) = for x=a; print(io, x); end
-    function show(io, e::Expr)
-        print(io, e.head)
-        print(io, "(")
-        for i=1:arraylen(e.args)
-            show(io, arrayref(e.args,i))
-            print(io, ", ")
-        end
-        print(io, ")\n")
+using .Base
+
+# Set up Main module
+using Base.MainInclude # ans, err, and sometimes Out
+
+# These definitions calls Base._include rather than Base.include to get
+# one-frame stacktraces for the common case of using include(fname) in Main.
+
+"""
+    include([mapexpr::Function,] path::AbstractString)
+
+Evaluate the contents of the input source file in the global scope of the containing module.
+Every module (except those defined with `baremodule`) has its own
+definition of `include`, which evaluates the file in that module.
+Returns the result of the last evaluated expression of the input file. During including,
+a task-local include path is set to the directory containing the file. Nested calls to
+`include` will search relative to that path. This function is typically used to load source
+interactively, or to combine files in packages that are broken into multiple source files.
+The argument `path` is normalized using [`normpath`](@ref) which will resolve
+relative path tokens such as `..` and convert `/` to the appropriate path separator.
+
+The optional first argument `mapexpr` can be used to transform the included code before
+it is evaluated: for each parsed expression `expr` in `path`, the `include` function
+actually evaluates `mapexpr(expr)`.  If it is omitted, `mapexpr` defaults to [`identity`](@ref).
+
+Use [`Base.include`](@ref) to evaluate a file into another module.
+
+!!! compat "Julia 1.5"
+    Julia 1.5 is required for passing the `mapexpr` argument.
+"""
+include(mapexpr::Function, fname::AbstractString) = Base._include(mapexpr, Main, fname)
+function include(fname::AbstractString)
+    isa(fname, String) || (fname = Base.convert(String, fname)::String)
+    Base._include(identity, Main, fname)
+end
+
+"""
+    eval(expr)
+
+Evaluate an expression in the global scope of the containing module.
+Every `Module` (except those defined with `baremodule`) has its own 1-argument
+definition of `eval`, which evaluates expressions in that module.
+"""
+eval(x) = Core.eval(Main, x)
+
+# Ensure this file is also tracked
+pushfirst!(Base._included_files, (@__MODULE__, abspath(@__FILE__)))
+
+# set up depot & load paths to be able to find stdlib packages
+Base.init_depot_path()
+Base.init_load_path()
+
+if Base.is_primary_base_module
+# load some stdlib packages but don't put their names in Main
+let
+    # Loading here does not call __init__(). This leads to uninitialized RNG
+    # state which causes rand(::UnitRange{Int}) to hang. This is a workaround:
+    task = current_task()
+    task.rngState0 = 0x5156087469e170ab
+    task.rngState1 = 0x7431eaead385992c
+    task.rngState2 = 0x503e1d32781c2608
+    task.rngState3 = 0x3a77f7189200c20b
+    task.rngState4 = 0x5502376d099035ae
+
+    # Stdlibs sorted in dependency, then alphabetical, order by contrib/print_sorted_stdlibs.jl
+    # Run with the `--exclude-jlls` option to filter out all JLL packages
+    if isdefined(Base.BuildSettings, :INCLUDE_STDLIBS)
+        # e.g. INCLUDE_STDLIBS = "FileWatching,Libdl,Artifacts,SHA,Sockets,LinearAlgebra,Random"
+        stdlibs = Symbol.(split(Base.BuildSettings.INCLUDE_STDLIBS, ","))
+    else
+        # TODO: this is included for compatibility with PackageCompiler, which looks for it.
+        # This should eventually be removed so we only use `BuildSettings`.
+        stdlibs = [
+            # No dependencies
+            :FileWatching, # used by loading.jl -- implicit assumption that init runs
+            :Libdl, # Transitive through LinAlg
+            :Artifacts, # Transitive through LinAlg
+            :SHA, # transitive through Random
+            :Sockets, # used by stream.jl
+
+            # Transitive through LingAlg
+            # OpenBLAS_jll
+            # libblastrampoline_jll
+
+            # 1-depth packages
+            :LinearAlgebra, # Commits type-piracy and GEMM
+            :Random, # Can't be removed due to rand being exported by Base
+        ]
     end
+    # PackageCompiler can filter out stdlibs so it can be empty
+    maxlen = maximum(textwidth.(string.(stdlibs)); init=0)
+
+    tot_time_stdlib = 0.0
+    # use a temp module to avoid leaving the type of this closure in Main
+    push!(empty!(LOAD_PATH), "@stdlib")
+    m = Core.Module()
+    GC.@preserve m begin
+        print_time = @eval m (mod, t) -> (print(rpad(string(mod) * "  ", $maxlen + 3, "─"));
+                                          Base.time_print(stdout, t * 10^9); println())
+        print_time(Base, (Base.end_base_include - Base.start_base_include) * 10^(-9))
+
+        Base._track_dependencies[] = true
+        tot_time_stdlib = @elapsed for stdlib in stdlibs
+            tt = @elapsed Base.require(Base, stdlib)
+            print_time(stdlib, tt)
+        end
+        for dep in Base._require_dependencies
+            mod, path, fsize, mtime = dep[1], dep[2], dep[3], dep[5]
+            (fsize == 0 || mtime == 0.0) && continue
+            push!(Base._included_files, (mod, path))
+        end
+        empty!(Base._require_dependencies)
+        Base._track_dependencies[] = false
+
+        print_time("Stdlibs total", tot_time_stdlib)
+    end
+
+    # Clear global state
+    empty!(Core.ARGS)
+    empty!(Base.ARGS)
+    empty!(LOAD_PATH)
+    Base.init_load_path() # want to be able to find external packages in userimg.jl
+
+    ccall(:jl_clear_implicit_imports, Cvoid, (Any,), Main)
+
+    tot_time_userimg = @elapsed (isfile("userimg.jl") && Base.include(Main, "userimg.jl"))
+
+    tot_time_base = (Base.end_base_include - Base.start_base_include) * 10.0^(-9)
+    tot_time = tot_time_base + tot_time_stdlib + tot_time_userimg
+
+    println("Sysimage built. Summary:")
+    print("Base ──────── "); Base.time_print(stdout, tot_time_base    * 10^9); print(" "); show(IOContext(stdout, :compact=>true), (tot_time_base    / tot_time) * 100); println("%")
+    print("Stdlibs ───── "); Base.time_print(stdout, tot_time_stdlib  * 10^9); print(" "); show(IOContext(stdout, :compact=>true), (tot_time_stdlib  / tot_time) * 100); println("%")
+    if isfile("userimg.jl")
+    print("Userimg ───── "); Base.time_print(stdout, tot_time_userimg * 10^9); print(" "); show(IOContext(stdout, :compact=>true), (tot_time_userimg / tot_time) * 100); println("%")
+    end
+    print("Total ─────── "); Base.time_print(stdout, tot_time         * 10^9); println();
+
+    empty!(LOAD_PATH)
+    empty!(DEPOT_PATH)
 end
 
-## Load essential files and libraries
-
-include("base.jl")
-
-# core operations & types
-include("range.jl")
-include("tuple.jl")
-include("cell.jl")
-include("expr.jl")
-include("error.jl")
-
-# core numeric operations & types
-include("bool.jl")
-include("number.jl")
-include("int.jl")
-include("promotion.jl")
-include("operators.jl")
-include("pointer.jl")
-
-_jl_lib = ccall(:jl_load_dynamic_library,Ptr{Void},(Ptr{None},),C_NULL)
-_jl_libfdm = dlopen("libfdm")
-
-include("float.jl")
-include("reduce.jl")
-include("complex.jl")
-include("rational.jl")
-
-# core data structures (used by type inference)
-include("abstractarray.jl")
-include("subarray.jl")
-include("array.jl")
-include("intset.jl")
-include("dict.jl")
-include("set.jl")
-
-# compiler
-include("inference.jl")
-
-# I/O, strings & printing
-include("io.jl")
-include("char.jl")
-include("ascii.jl")
-include("utf8.jl")
-include("string.jl")
-include("regex.jl")
-include("show.jl")
-include("grisu.jl")
-include("printf.jl")
-
-# concurrency and parallelism
-include("iterator.jl")
-include("task.jl")
-include("process.jl")
-include("serialize.jl")
-include("multi.jl")
-
-# system & environment
-include("osutils.jl")
-include("libc.jl")
-include("env.jl")
-include("errno_h.jl")
-include("file.jl")
-include("stat.jl")
-
-# front end
-include("client.jl")
-
-# core math functions
-include("intfuncs.jl")
-include("floatfuncs.jl")
-include("math.jl")
-include("math_libm.jl")
-include("sort.jl")
-include("combinatorics.jl")
-include("statistics.jl")
-
-# random number generation
-include("random.jl")
-
-# distributed arrays and memory-mapped arrays
-include("darray.jl")
-include("mmap.jl")
-
-# utilities - version, timing, help, edit
-include("version.jl")
-include("util.jl")
-include("datafmt.jl")
-include("deepcopy.jl")
-
-## Load optional external libraries
-
-include("build_h.jl")
-
-# linear algebra
-include("linalg_blas.jl")
-include("linalg.jl")
-include("linalg_dense.jl")
-include("lapack.jl")
-include("linalg_lapack.jl")
-include("linalg_specialized.jl")
-include("factorizations.jl")
-
-# signal processing
-include("DSP_fftw.jl")
-include("DSP.jl")
-import Base.DSP.*
-
-# prime method cache with some things we know we'll need right after startup
-compile_hint(cwd, ())
-compile_hint(fdio, (Int32,))
-compile_hint(ProcessGroup, (Int, Array{Any,1}, Array{Any,1}))
-compile_hint(select_read, (FDSet, Float64))
-compile_hint(next, (Dict{Any,Any}, Int))
-compile_hint(start, (Dict{Any,Any},))
-compile_hint(perform_work, ())
-compile_hint(isempty, (Array{Any,1},))
-compile_hint(isempty, (Array{WorkItem,1},))
-compile_hint(ref, (Dict{Any,Any}, Int32))
-compile_hint(event_loop, (Bool,))
-compile_hint(_start, ())
-compile_hint(process_options, (Array{Any,1},))
-compile_hint(run_repl, ())
-compile_hint(anyp, (Function, Array{Any,1}))
-compile_hint(Dict{Any,Any}, (Int,))
-compile_hint(Set, ())
-compile_hint(assign, (Dict{Any,Any}, Bool, Cmd))
-compile_hint(rehash, (Dict{Any,Any}, Int))
-compile_hint(run, (Cmd,))
-compile_hint(spawn, (Cmd,))
-compile_hint(assign, (Dict{Any,Any}, Bool, FileDes))
-compile_hint(wait, (Int32,))
-compile_hint(system_error, (ASCIIString, Bool))
-compile_hint(SystemError, (ASCIIString,))
-compile_hint(has, (EnvHash, ASCIIString))
-compile_hint(parse_input_line, (ASCIIString,))
-compile_hint(cmp, (Int32, Int32))
-compile_hint(min, (Int32, Int32))
-compile_hint(==, (ASCIIString, ASCIIString))
-compile_hint(arg_gen, (ASCIIString,))
-compile_hint(_jl_librandom_init, ())
-compile_hint(srand, (ASCIIString, Int))
-compile_hint(open, (ASCIIString, Bool, Bool, Bool, Bool))
-compile_hint(srand, (Uint64,))
-compile_hint(done, (IntSet, Int64))
-compile_hint(next, (IntSet, Int64))
-compile_hint(ht_keyindex, (Dict{Any,Any}, Int32))
-compile_hint(perform_work, (WorkItem,))
-compile_hint(notify_done, (WorkItem,))
-compile_hint(work_result, (WorkItem,))
-compile_hint(del_fd_handler, (Int32,))
-compile_hint(enqueue, (Array{WorkItem,1}, WorkItem))
-compile_hint(enq_work, (WorkItem,))
-compile_hint(pop, (Array{WorkItem,1},))
-compile_hint(string, (Int,))
-compile_hint(parse_int, (Type{Int}, ASCIIString, Int))
-compile_hint(repeat, (ASCIIString, Int))
-compile_hint(KeyError, (Int,))
-compile_hint(show, (Float64,))
-compile_hint(match, (Regex, ASCIIString))
-compile_hint(strlen, (ASCIIString,))
-compile_hint(alignment, (Float64,))
-compile_hint(repl_callback, (Expr, Int))
-compile_hint(istaskdone, (Task,))
-compile_hint(make_stdout_stream, ())
-compile_hint(make_stdin_stream, ())
-compile_hint(make_stderr_stream, ())
-compile_hint(int, (Uint64,))
-compile_hint(copy, (Bool,))
-compile_hint(bool, (Bool,))
-compile_hint(bool, (RemoteRef,))
-compile_hint(wait, (RemoteRef,))
-compile_hint(hash, (RemoteRef,))
-compile_hint(take, (RemoteRef,))
-compile_hint(bitmix, (Int, Int))
-compile_hint(bitmix, (Uint, Int))
-compile_hint(bitmix, (Uint64, Int64))
-compile_hint(hash, (Int,))
-compile_hint(isequal, (Symbol, Symbol))
-compile_hint(isequal, (Bool, Bool))
-compile_hint(WaitFor, (Symbol, RemoteRef))
-compile_hint(_jl_answer_color, ())
-compile_hint(get, (EnvHash, ASCIIString, ASCIIString))
-compile_hint(notify_empty, (WorkItem,))
-compile_hint(rr2id, (RemoteRef,))
-compile_hint(isequal, (RemoteRef, WeakRef))
-compile_hint(isequal, (RemoteRef, RemoteRef))
-compile_hint(_ieval, (Symbol,))
-compile_hint(static_convert, (Nothing, Nothing))
-compile_hint(assign, (Array{Any,1}, WeakRef, Int))
-compile_hint(assign, (Dict{Any,Any}, WorkItem, (Int,Int)))
-compile_hint(isequal, ((Int,Int),(Int,Int)))
-compile_hint(RemoteRef, (Int, Int, Int))
-compile_hint(_jl_eval_user_input, (Expr, Bool))
-compile_hint(print, (Float64,))
-compile_hint(a2t, (Array{Any,1},))
-compile_hint(flush, (IOStream,))
-compile_hint(ref, (Type{String}, ASCIIString, ASCIIString, ASCIIString))
-compile_hint(int, (Int,))
-compile_hint(uint, (Uint,))
-compile_hint(_atexit, ())
-compile_hint(read, (IOStream, Array{Uint32,1}))
-compile_hint(hex, (Char, Int))
-compile_hint(abs, (Char,))
-compile_hint(abstract_eval, (LambdaStaticData, ObjectIdDict, StaticVarInfo))
-compile_hint(length, (Range1{Int},))
-compile_hint(start, (Range1{Int},))
-compile_hint(done, (Range1{Int},Int))
-compile_hint(next, (Range1{Int},Int))
-compile_hint(IOStream, (ASCIIString, Array{Uint8,1}))
-compile_hint(mk_tupleref, (SymbolNode, Int))
-compile_hint(abstract_interpret, (Bool, ObjectIdDict, StaticVarInfo))
-compile_hint(eval_annotate, (LambdaStaticData, ObjectIdDict, StaticVarInfo, ObjectIdDict, Array{Any,1}))
-compile_hint(occurs_more, (Bool, Function, Int))
-compile_hint(isconstantfunc, (SymbolNode, StaticVarInfo))
-compile_hint(CallStack, (Expr, Module, (Nothing,), EmptyCallStack))
-compile_hint(convert, (Type{Module}, Module))
-compile_hint(effect_free, (Expr,))
-compile_hint(effect_free, (TopNode,))
-
-# invoke type inference, running the existing inference code on the new
-# inference code to cache an optimized version of it.
-begin
-    local atypes = (LambdaStaticData, Tuple, (), LambdaStaticData, Bool)
-    local minf = methods(typeinf, atypes)
-    typeinf_ext(minf[1][3], atypes, (), minf[1][3])
+empty!(Base.TOML_CACHE.d)
+Base.TOML.reinit!(Base.TOML_CACHE.p, "")
+@eval Base BUILDROOT = ""
+@eval Sys begin
+    BINDIR = ""
+    STDLIB = ""
 end
-
-end # module Base
-
-import Base.*
-
-# create system image file
-ccall(:jl_save_system_image, Void, (Ptr{Uint8},Ptr{Uint8}),
-      "$JULIA_HOME/../lib/julia/sys.ji", "start_image.jl")
+end

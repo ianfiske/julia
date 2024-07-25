@@ -1,1 +1,0 @@
-@assert rand() != rand()
